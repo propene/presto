@@ -18,12 +18,18 @@ import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.execution.TaskState;
 import com.facebook.presto.execution.TaskStateMachine;
+import com.facebook.presto.memory.QueryContext;
+import com.facebook.presto.util.ImmutableCollectors;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.AtomicDouble;
+import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.stats.CounterStat;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import org.joda.time.DateTime;
 
+import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.List;
@@ -32,25 +38,24 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static com.facebook.presto.util.Threads.checkNotSameThreadExecutor;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.transform;
-import static io.airlift.units.DataSize.Unit.BYTE;
-import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.airlift.units.DataSize.succinctBytes;
+import static java.lang.Math.max;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 @ThreadSafe
 public class TaskContext
 {
+    private final QueryContext queryContext;
     private final TaskStateMachine taskStateMachine;
     private final Executor executor;
     private final Session session;
 
-    private final long maxMemory;
     private final DataSize operatorPreAllocatedMemory;
-
     private final AtomicLong memoryReservation = new AtomicLong();
+    private final AtomicLong systemMemoryReservation = new AtomicLong();
 
     private final long createNanos = System.nanoTime();
 
@@ -66,57 +71,34 @@ public class TaskContext
     private final boolean verboseStats;
     private final boolean cpuTimerEnabled;
 
-    public TaskContext(TaskId taskId, Executor executor, Session session)
-    {
-        this(
-                checkNotNull(taskId, "taskId is null"),
-                checkNotSameThreadExecutor(executor, "executor is null"),
-                session,
-                new DataSize(256, MEGABYTE));
-    }
+    private final Object cumulativeMemoryLock = new Object();
+    private final AtomicDouble cumulativeMemory = new AtomicDouble(0.0);
 
-    public TaskContext(TaskId taskId, Executor executor, Session session, DataSize maxMemory)
-    {
-        this(
-                taskId,
-                executor,
-                session,
-                checkNotNull(maxMemory, "maxMemory is null"),
-                true);
-    }
+    @GuardedBy("cumulativeMemoryLock")
+    private long lastMemoryReservation = 0;
 
-    public TaskContext(TaskId taskId, Executor executor, Session session, DataSize maxMemory, boolean cpuTimerEnabled)
-    {
-        this(
-                new TaskStateMachine(checkNotNull(taskId, "taskId is null"), checkNotSameThreadExecutor(executor, "executor is null")),
-                executor,
-                session,
-                checkNotNull(maxMemory, "maxMemory is null"),
-                new DataSize(1, MEGABYTE),
-                true,
-                cpuTimerEnabled);
-    }
+    @GuardedBy("cumulativeMemoryLock")
+    private long lastTaskStatCallNanos = 0;
 
-    public TaskContext(TaskStateMachine taskStateMachine,
+    public TaskContext(QueryContext queryContext,
+            TaskStateMachine taskStateMachine,
             Executor executor,
             Session session,
-            DataSize maxMemory,
             DataSize operatorPreAllocatedMemory,
             boolean verboseStats,
             boolean cpuTimerEnabled)
     {
-        this.taskStateMachine = checkNotNull(taskStateMachine, "taskStateMachine is null");
-        this.executor = checkNotNull(executor, "executor is null");
+        this.taskStateMachine = requireNonNull(taskStateMachine, "taskStateMachine is null");
+        this.queryContext = requireNonNull(queryContext, "queryContext is null");
+        this.executor = requireNonNull(executor, "executor is null");
         this.session = session;
-        this.maxMemory = checkNotNull(maxMemory, "maxMemory is null").toBytes();
-        this.operatorPreAllocatedMemory = checkNotNull(operatorPreAllocatedMemory, "operatorPreAllocatedMemory is null");
-
+        this.operatorPreAllocatedMemory = requireNonNull(operatorPreAllocatedMemory, "operatorPreAllocatedMemory is null");
         taskStateMachine.addStateChangeListener(new StateChangeListener<TaskState>()
         {
             @Override
-            public void stateChanged(TaskState newValue)
+            public void stateChanged(TaskState newState)
             {
-                if (newValue.isDone()) {
+                if (newState.isDone()) {
                     executionEndTime.set(DateTime.now());
                     endNanos.set(System.nanoTime());
                 }
@@ -146,12 +128,11 @@ public class TaskContext
 
     public void start()
     {
-        if (!startNanos.compareAndSet(0, System.nanoTime())) {
-            // already started
-            return;
-        }
         DateTime now = DateTime.now();
         executionStartTime.compareAndSet(null, now);
+        startNanos.compareAndSet(0, System.nanoTime());
+
+        // always update last execution start time
         lastExecutionStartTime.set(now);
     }
 
@@ -170,31 +151,58 @@ public class TaskContext
         return taskStateMachine.getState();
     }
 
-    public DataSize getMaxMemorySize()
-    {
-        return new DataSize(maxMemory, BYTE).convertToMostSuccinctDataSize();
-    }
-
     public DataSize getOperatorPreAllocatedMemory()
     {
         return operatorPreAllocatedMemory;
     }
 
-    public synchronized boolean reserveMemory(long bytes)
+    public synchronized ListenableFuture<?> reserveMemory(long bytes)
     {
         checkArgument(bytes >= 0, "bytes is negative");
 
-        if (memoryReservation.get() + bytes > maxMemory) {
-            return false;
-        }
+        ListenableFuture<?> future = queryContext.reserveMemory(bytes);
         memoryReservation.getAndAdd(bytes);
-        return true;
+        return future;
+    }
+
+    public synchronized ListenableFuture<?> reserveSystemMemory(long bytes)
+    {
+        checkArgument(bytes >= 0, "bytes is negative");
+        ListenableFuture<?> future = queryContext.reserveSystemMemory(bytes);
+        systemMemoryReservation.getAndAdd(bytes);
+        return future;
+    }
+
+    public synchronized boolean tryReserveMemory(long bytes)
+    {
+        checkArgument(bytes >= 0, "bytes is negative");
+
+        if (queryContext.tryReserveMemory(bytes)) {
+            memoryReservation.getAndAdd(bytes);
+            return true;
+        }
+        return false;
     }
 
     public synchronized void freeMemory(long bytes)
     {
+        checkArgument(bytes >= 0, "bytes is negative");
         checkArgument(bytes <= memoryReservation.get(), "tried to free more memory than is reserved");
         memoryReservation.getAndAdd(-bytes);
+        queryContext.freeMemory(bytes);
+    }
+
+    public synchronized void freeSystemMemory(long bytes)
+    {
+        checkArgument(bytes >= 0, "bytes is negative");
+        checkArgument(bytes <= systemMemoryReservation.get(), "tried to free more memory than is reserved");
+        systemMemoryReservation.getAndAdd(-bytes);
+        queryContext.freeSystemMemory(bytes);
+    }
+
+    public void moreMemoryAvailable()
+    {
+        pipelineContexts.stream().forEach(PipelineContext::moreMemoryAvailable);
     }
 
     public boolean isVerboseStats()
@@ -264,6 +272,8 @@ public class TaskContext
 
         List<PipelineStats> pipelineStats = ImmutableList.copyOf(transform(pipelineContexts, PipelineContext::getPipelineStats));
 
+        long lastExecutionEndTime = 0;
+
         int totalDrivers = 0;
         int queuedDrivers = 0;
         int queuedPartitionedDrivers = 0;
@@ -286,6 +296,10 @@ public class TaskContext
         long outputPositions = 0;
 
         for (PipelineStats pipeline : pipelineStats) {
+            if (pipeline.getLastEndTime() != null) {
+                lastExecutionEndTime = max(pipeline.getLastEndTime().getMillis(), lastExecutionEndTime);
+            }
+
             totalDrivers += pipeline.getTotalDrivers();
             queuedDrivers += pipeline.getQueuedDrivers();
             queuedPartitionedDrivers += pipeline.getQueuedPartitionedDrivers();
@@ -313,7 +327,7 @@ public class TaskContext
         }
 
         long startNanos = this.startNanos.get();
-        if (startNanos < createNanos) {
+        if (startNanos == 0) {
             startNanos = System.nanoTime();
         }
         Duration queuedTime = new Duration(startNanos - createNanos, NANOSECONDS);
@@ -327,10 +341,28 @@ public class TaskContext
             elapsedTime = new Duration(0, NANOSECONDS);
         }
 
+        synchronized (cumulativeMemoryLock) {
+            double sinceLastPeriodMillis = (System.nanoTime() - lastTaskStatCallNanos) / 1_000_000.0;
+            long currentSystemMemory = systemMemoryReservation.get();
+            long averageMemoryForLastPeriod = (currentSystemMemory + lastMemoryReservation) / 2;
+            cumulativeMemory.addAndGet(averageMemoryForLastPeriod * sinceLastPeriodMillis);
+
+            lastTaskStatCallNanos = System.nanoTime();
+            lastMemoryReservation = currentSystemMemory;
+        }
+
+        boolean fullyBlocked = pipelineStats.stream()
+                .filter(pipeline -> pipeline.getRunningDrivers() > 0 || pipeline.getRunningPartitionedDrivers() > 0)
+                .allMatch(PipelineStats::isFullyBlocked);
+        ImmutableSet<BlockedReason> blockedReasons = pipelineStats.stream()
+                .filter(pipeline -> pipeline.getRunningDrivers() > 0 || pipeline.getRunningPartitionedDrivers() > 0)
+                .flatMap(pipeline -> pipeline.getBlockedReasons().stream())
+                .collect(ImmutableCollectors.toImmutableSet());
         return new TaskStats(
                 taskStateMachine.getCreatedTime(),
                 executionStartTime.get(),
                 lastExecutionStartTime.get(),
+                lastExecutionEndTime == 0 ? null : new DateTime(lastExecutionEndTime),
                 executionEndTime.get(),
                 elapsedTime.convertToMostSuccinctTimeUnit(),
                 queuedTime.convertToMostSuccinctTimeUnit(),
@@ -340,16 +372,20 @@ public class TaskContext
                 runningDrivers,
                 runningPartitionedDrivers,
                 completedDrivers,
-                new DataSize(memoryReservation.get(), BYTE).convertToMostSuccinctDataSize(),
+                cumulativeMemory.get(),
+                succinctBytes(memoryReservation.get()),
+                succinctBytes(systemMemoryReservation.get()),
                 new Duration(totalScheduledTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalCpuTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalUserTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
-                new DataSize(rawInputDataSize, BYTE).convertToMostSuccinctDataSize(),
+                fullyBlocked && (runningDrivers > 0 || runningPartitionedDrivers > 0),
+                blockedReasons,
+                succinctBytes(rawInputDataSize),
                 rawInputPositions,
-                new DataSize(processedInputDataSize, BYTE).convertToMostSuccinctDataSize(),
+                succinctBytes(processedInputDataSize),
                 processedInputPositions,
-                new DataSize(outputDataSize, BYTE).convertToMostSuccinctDataSize(),
+                succinctBytes(outputDataSize),
                 outputPositions,
                 pipelineStats);
     }

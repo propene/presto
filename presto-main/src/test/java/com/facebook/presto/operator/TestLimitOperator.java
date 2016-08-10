@@ -13,9 +13,9 @@
  */
 package com.facebook.presto.operator;
 
-import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.operator.LimitOperator.LimitOperatorFactory;
 import com.facebook.presto.spi.Page;
+import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import static com.facebook.presto.RowPagesBuilder.rowPagesBuilder;
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
+import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 
@@ -40,7 +41,7 @@ public class TestLimitOperator
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
-        driverContext = new TaskContext(new TaskId("query", "stage", "task"), executor, TEST_SESSION)
+        driverContext = createTaskContext(executor, TEST_SESSION)
                 .addPipelineContext(true, true)
                 .addDriverContext();
     }
@@ -61,7 +62,7 @@ public class TestLimitOperator
                 .addSequencePage(2, 6)
                 .build();
 
-        OperatorFactory operatorFactory = new LimitOperatorFactory(0, ImmutableList.of(BIGINT), 5);
+        OperatorFactory operatorFactory = new LimitOperatorFactory(0, new PlanNodeId("test"), ImmutableList.of(BIGINT), 5);
         Operator operator = operatorFactory.createOperator(driverContext);
 
         List<Page> expected = rowPagesBuilder(BIGINT)
@@ -82,7 +83,7 @@ public class TestLimitOperator
                 .addSequencePage(2, 6)
                 .build();
 
-        OperatorFactory operatorFactory = new LimitOperatorFactory(0, ImmutableList.of(BIGINT), 6);
+        OperatorFactory operatorFactory = new LimitOperatorFactory(0, new PlanNodeId("test"), ImmutableList.of(BIGINT), 6);
         Operator operator = operatorFactory.createOperator(driverContext);
 
         List<Page> expected = rowPagesBuilder(BIGINT)

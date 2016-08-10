@@ -18,6 +18,7 @@ import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
+import com.facebook.presto.spi.block.InterleavedBlockBuilder;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.testing.MaterializedResult;
 import com.google.common.collect.ImmutableList;
@@ -29,7 +30,9 @@ import java.util.Optional;
 
 import static com.facebook.presto.operator.PageAssertions.assertPageEquals;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
+import static com.facebook.presto.type.TypeJsonUtils.appendToBlockBuilder;
 import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.testing.Assertions.assertEqualsIgnoreOrder;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -62,6 +65,10 @@ public final class OperatorAssertion
         ImmutableList.Builder<Page> outputPages = ImmutableList.builder();
 
         boolean finishing = false;
+
+        while (operator.needsInput() && input.hasNext()) {
+            operator.addInput(input.next());
+        }
 
         for (int loops = 0; !operator.isFinished() && loops < 10_000; loops++) {
             if (operator.needsInput()) {
@@ -135,6 +142,17 @@ public final class OperatorAssertion
             resultBuilder.page(outputPage);
         }
         return resultBuilder.build();
+    }
+
+    public static Block toRow(List<Type> parameterTypes, Object... values)
+    {
+        checkArgument(parameterTypes.size() == values.length, "parameterTypes.size(" + parameterTypes.size() + ") does not equal to values.length(" + values.length + ")");
+
+        BlockBuilder blockBuilder = new InterleavedBlockBuilder(parameterTypes, new BlockBuilderStatus(), parameterTypes.size());
+        for (int i = 0; i < values.length; i++) {
+            appendToBlockBuilder(parameterTypes.get(i), values[i], blockBuilder);
+        }
+        return blockBuilder.build();
     }
 
     public static void assertOperatorEquals(Operator operator, List<Page> expected)

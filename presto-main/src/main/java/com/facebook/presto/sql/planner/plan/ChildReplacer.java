@@ -38,9 +38,17 @@ public class ChildReplacer
 {
     private static final ChildReplacer INSTANCE = new ChildReplacer();
 
+    /**
+     * Return an identical copy of the given node with its children replaced
+     */
     public static PlanNode replaceChildren(PlanNode node, List<PlanNode> children)
     {
-        return node.accept(INSTANCE, children);
+        for (int i = 0; i < node.getSources().size(); i++) {
+            if (children.get(i) != node.getSources().get(i)) {
+                return node.accept(INSTANCE, children);
+            }
+        }
+        return node;
     }
 
     @Override
@@ -50,15 +58,21 @@ public class ChildReplacer
     }
 
     @Override
+    public PlanNode visitExplainAnalyze(ExplainAnalyzeNode node, List<PlanNode> newChildren)
+    {
+        return new ExplainAnalyzeNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getOutputSymbol());
+    }
+
+    @Override
     public PlanNode visitLimit(LimitNode node, List<PlanNode> newChildren)
     {
-        return new LimitNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getCount());
+        return new LimitNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getCount(), node.isPartial());
     }
 
     @Override
     public PlanNode visitDistinctLimit(DistinctLimitNode node, List<PlanNode> newChildren)
     {
-        return new DistinctLimitNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getLimit(), node.getHashSymbol());
+        return new DistinctLimitNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getLimit(), node.isPartial(), node.getHashSymbol());
     }
 
     @Override
@@ -66,6 +80,18 @@ public class ChildReplacer
     {
         checkArgument(newChildren.isEmpty(), "newChildren is not empty");
         return node;
+    }
+
+    @Override
+    public PlanNode visitExchange(ExchangeNode node, List<PlanNode> newChildren)
+    {
+        return new ExchangeNode(
+                node.getId(),
+                node.getType(),
+                node.getScope(),
+                node.getPartitioningScheme(),
+                newChildren,
+                node.getInputs());
     }
 
     @Override
@@ -122,7 +148,7 @@ public class ChildReplacer
     public PlanNode visitJoin(JoinNode node, List<PlanNode> newChildren)
     {
         checkArgument(newChildren.size() == 2, "expected newChildren to contain 2 nodes");
-        return new JoinNode(node.getId(), node.getType(), newChildren.get(0), newChildren.get(1), node.getCriteria(), node.getLeftHashSymbol(), node.getRightHashSymbol());
+        return new JoinNode(node.getId(), node.getType(), newChildren.get(0), newChildren.get(1), node.getCriteria(), node.getFilter(), node.getLeftHashSymbol(), node.getRightHashSymbol());
     }
 
     @Override
@@ -142,7 +168,13 @@ public class ChildReplacer
     @Override
     public PlanNode visitAggregation(AggregationNode node, List<PlanNode> newChildren)
     {
-        return new AggregationNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getGroupBy(), node.getAggregations(), node.getFunctions(), node.getMasks(), node.getStep(), node.getSampleWeight(), node.getConfidence(), node.getHashSymbol());
+        return new AggregationNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getGroupBy(), node.getAggregations(), node.getFunctions(), node.getMasks(), node.getGroupingSets(), node.getStep(), node.getSampleWeight(), node.getConfidence(), node.getHashSymbol());
+    }
+
+    @Override
+    public PlanNode visitGroupId(GroupIdNode node, List<PlanNode> newChildren)
+    {
+        return new GroupIdNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getGroupingSets(), node.getIdentityMappings(), node.getGroupIdSymbol());
     }
 
     @Override
@@ -154,7 +186,15 @@ public class ChildReplacer
     @Override
     public PlanNode visitWindow(WindowNode node, List<PlanNode> newChildren)
     {
-        return new WindowNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getPartitionBy(), node.getOrderBy(), node.getOrderings(), node.getFrame(), node.getWindowFunctions(), node.getSignatures(), node.getHashSymbol());
+        return new WindowNode(
+                node.getId(),
+                Iterables.getOnlyElement(newChildren),
+                node.getSpecification(),
+                node.getWindowFunctions(),
+                node.getSignatures(),
+                node.getHashSymbol(),
+                node.getPrePartitionedInputs(),
+                node.getPreSortedOrderPrefix());
     }
 
     @Override
@@ -184,18 +224,57 @@ public class ChildReplacer
     @Override
     public PlanNode visitTableWriter(TableWriterNode node, List<PlanNode> newChildren)
     {
-        return new TableWriterNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getTarget(), node.getColumns(), node.getColumnNames(), node.getOutputSymbols(), node.getSampleWeightSymbol());
+        return new TableWriterNode(
+                node.getId(),
+                Iterables.getOnlyElement(newChildren),
+                node.getTarget(),
+                node.getColumns(),
+                node.getColumnNames(),
+                node.getOutputSymbols(),
+                node.getSampleWeightSymbol(),
+                node.getPartitioningScheme());
     }
 
     @Override
-    public PlanNode visitTableCommit(TableCommitNode node, List<PlanNode> newChildren)
+    public PlanNode visitTableFinish(TableFinishNode node, List<PlanNode> newChildren)
     {
-        return new TableCommitNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getTarget(), node.getOutputSymbols());
+        return new TableFinishNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getTarget(), node.getOutputSymbols());
     }
 
     @Override
     public PlanNode visitUnion(UnionNode node, List<PlanNode> newChildren)
     {
-        return new UnionNode(node.getId(), newChildren, node.getSymbolMapping());
+        return new UnionNode(node.getId(), newChildren, node.getSymbolMapping(), node.getOutputSymbols());
+    }
+
+    @Override
+    public PlanNode visitIntersect(IntersectNode node, List<PlanNode> newChildren)
+    {
+        return new IntersectNode(node.getId(), newChildren, node.getSymbolMapping(), node.getOutputSymbols());
+    }
+
+    @Override
+    public PlanNode visitExcept(ExceptNode node, List<PlanNode> newChildren)
+    {
+        return new ExceptNode(node.getId(), newChildren, node.getSymbolMapping(), node.getOutputSymbols());
+    }
+
+    @Override
+    public PlanNode visitDelete(DeleteNode node, List<PlanNode> newChildren)
+    {
+        return new DeleteNode(node.getId(), Iterables.getOnlyElement(newChildren), node.getTarget(), node.getRowId(), node.getOutputSymbols());
+    }
+
+    @Override
+    public PlanNode visitEnforceSingleRow(EnforceSingleRowNode node, List<PlanNode> newChildren)
+    {
+        return new EnforceSingleRowNode(node.getId(), Iterables.getOnlyElement(newChildren));
+    }
+
+    @Override
+    public PlanNode visitApply(ApplyNode node, List<PlanNode> newChildren)
+    {
+        checkArgument(newChildren.size() == 2, "expected newChildren to contain 2 nodes");
+        return new ApplyNode(node.getId(), newChildren.get(0), newChildren.get(1), node.getCorrelation());
     }
 }

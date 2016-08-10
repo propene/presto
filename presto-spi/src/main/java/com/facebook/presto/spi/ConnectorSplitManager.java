@@ -13,21 +13,11 @@
  */
 package com.facebook.presto.spi;
 
-import java.util.List;
-
+@Deprecated
 public interface ConnectorSplitManager
 {
-    /**
-     * Gets the Partitions for the specified table.
-     *
-     * The TupleDomain indicates the execution filters that will be directly applied to the
-     * data stream produced by this connector. Connectors are encouraged to take advantage of
-     * this information to perform connector-specific optimizations.
-     */
-    ConnectorPartitionResult getPartitions(ConnectorTableHandle table, TupleDomain<ConnectorColumnHandle> tupleDomain);
-
-    /**
-     * Gets the Splits for the specified Partitions in the indicated table.
-     */
-    ConnectorSplitSource getPartitionSplits(ConnectorTableHandle table, List<ConnectorPartition> partitions);
+    default ConnectorSplitSource getSplits(ConnectorSession session, ConnectorTableLayoutHandle layout)
+    {
+        throw new UnsupportedOperationException("not yet implemented");
+    }
 }

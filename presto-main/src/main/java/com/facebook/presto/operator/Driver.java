@@ -17,32 +17,39 @@ import com.facebook.presto.ScheduledSplit;
 import com.facebook.presto.TaskSource;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.spi.Page;
+import com.facebook.presto.spi.UpdatablePageSource;
 import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 
 import javax.annotation.concurrent.GuardedBy;
 
+import java.io.Closeable;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 import static com.facebook.presto.operator.Operator.NOT_BLOCKED;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 
 //
 // NOTE:  As a general strategy the methods should "stage" a change and only
@@ -51,12 +58,14 @@ import static com.google.common.base.Preconditions.checkState;
 // time and state changer threads are not blocked.
 //
 public class Driver
+        implements Closeable
 {
     private static final Logger log = Logger.get(Driver.class);
 
     private final DriverContext driverContext;
     private final List<Operator> operators;
-    private final Map<PlanNodeId, SourceOperator> sourceOperators;
+    private final Optional<SourceOperator> sourceOperator;
+    private final Optional<DeleteOperator> deleteOperator;
     private final ConcurrentMap<PlanNodeId, TaskSource> newSources = new ConcurrentHashMap<>();
 
     private final AtomicReference<State> state = new AtomicReference<>(State.ALIVE);
@@ -67,7 +76,7 @@ public class Driver
     private Thread lockHolder;
 
     @GuardedBy("exclusiveLock")
-    private Map<PlanNodeId, TaskSource> currentSources = new ConcurrentHashMap<>();
+    private final Map<PlanNodeId, TaskSource> currentSources = new ConcurrentHashMap<>();
 
     private enum State
     {
@@ -76,27 +85,33 @@ public class Driver
 
     public Driver(DriverContext driverContext, Operator firstOperator, Operator... otherOperators)
     {
-        this(checkNotNull(driverContext, "driverContext is null"),
+        this(requireNonNull(driverContext, "driverContext is null"),
                 ImmutableList.<Operator>builder()
-                        .add(checkNotNull(firstOperator, "firstOperator is null"))
-                        .add(checkNotNull(otherOperators, "otherOperators is null"))
+                        .add(requireNonNull(firstOperator, "firstOperator is null"))
+                        .add(requireNonNull(otherOperators, "otherOperators is null"))
                         .build());
     }
 
     public Driver(DriverContext driverContext, List<Operator> operators)
     {
-        this.driverContext = checkNotNull(driverContext, "driverContext is null");
-        this.operators = ImmutableList.copyOf(checkNotNull(operators, "operators is null"));
+        this.driverContext = requireNonNull(driverContext, "driverContext is null");
+        this.operators = ImmutableList.copyOf(requireNonNull(operators, "operators is null"));
         checkArgument(!operators.isEmpty(), "There must be at least one operator");
 
-        ImmutableMap.Builder<PlanNodeId, SourceOperator> sourceOperators = ImmutableMap.builder();
+        Optional<SourceOperator> sourceOperator = Optional.empty();
+        Optional<DeleteOperator> deleteOperator = Optional.empty();
         for (Operator operator : operators) {
             if (operator instanceof SourceOperator) {
-                SourceOperator sourceOperator = (SourceOperator) operator;
-                sourceOperators.put(sourceOperator.getSourceId(), sourceOperator);
+                checkArgument(!sourceOperator.isPresent(), "There must be at most one SourceOperator");
+                sourceOperator = Optional.of((SourceOperator) operator);
+            }
+            else if (operator instanceof DeleteOperator) {
+                checkArgument(!deleteOperator.isPresent(), "There must be at most one DeleteOperator");
+                deleteOperator = Optional.of((DeleteOperator) operator);
             }
         }
-        this.sourceOperators = sourceOperators.build();
+        this.sourceOperator = sourceOperator;
+        this.deleteOperator = deleteOperator;
     }
 
     public DriverContext getDriverContext()
@@ -104,11 +119,12 @@ public class Driver
         return driverContext;
     }
 
-    public Set<PlanNodeId> getSourceIds()
+    public Optional<PlanNodeId> getSourceId()
     {
-        return sourceOperators.keySet();
+        return sourceOperator.map(SourceOperator::getSourceId);
     }
 
+    @Override
     public void close()
     {
         // mark the service for destruction
@@ -167,7 +183,7 @@ public class Driver
         checkLockNotHeld("Can not update sources while holding the driver lock");
 
         // does this driver have an operator for the specified source?
-        if (!sourceOperators.containsKey(source.getPlanNodeId())) {
+        if (!sourceOperator.isPresent() || !sourceOperator.get().getSourceId().equals(source.getPlanNodeId())) {
             return;
         }
 
@@ -251,18 +267,20 @@ public class Driver
         }
 
         // add new splits
-        for (ScheduledSplit newSplit : newSplits) {
-            Split split = newSplit.getSplit();
+        if (sourceOperator.isPresent() && sourceOperator.get().getSourceId().equals(source.getPlanNodeId())) {
+            for (ScheduledSplit newSplit : newSplits) {
+                Split split = newSplit.getSplit();
 
-            SourceOperator sourceOperator = sourceOperators.get(source.getPlanNodeId());
-            if (sourceOperator != null) {
-                sourceOperator.addSplit(split);
+                Supplier<Optional<UpdatablePageSource>> pageSource = sourceOperator.get().addSplit(split);
+                if (deleteOperator.isPresent()) {
+                    deleteOperator.get().setPageSource(pageSource);
+                }
             }
-        }
 
-        // set no more splits
-        if (source.isNoMoreSplits()) {
-            sourceOperators.get(source.getPlanNodeId()).noMoreSplits();
+            // set no more splits
+            if (source.isNoMoreSplits()) {
+                sourceOperator.get().noMoreSplits();
+            }
         }
     }
 
@@ -270,7 +288,7 @@ public class Driver
     {
         checkLockNotHeld("Can not process for a duration while holding the driver lock");
 
-        checkNotNull(duration, "duration is null");
+        requireNonNull(duration, "duration is null");
 
         long maxRuntime = duration.roundTo(TimeUnit.NANOSECONDS);
 
@@ -319,21 +337,38 @@ public class Driver
                 processNewSources();
             }
 
-            for (int i = 0; i < operators.size() - 1 && !driverContext.isDone(); i++) {
-                // check if current operator is blocked
-                Operator current = operators.get(i);
-                ListenableFuture<?> blocked = current.isBlocked();
+            // special handling for drivers with a single operator
+            if (operators.size() == 1) {
+                if (driverContext.isDone()) {
+                    return NOT_BLOCKED;
+                }
+
+                // check if operator is blocked
+                Operator current = operators.get(0);
+                ListenableFuture<?> blocked = isBlocked(current);
                 if (!blocked.isDone()) {
                     current.getOperatorContext().recordBlocked(blocked);
                     return blocked;
                 }
 
-                // check if next operator is blocked
+                // there is only one operator so just finish it
+                current.getOperatorContext().startIntervalTimer();
+                current.finish();
+                current.getOperatorContext().recordFinish();
+                return NOT_BLOCKED;
+            }
+
+            boolean movedPage = false;
+            for (int i = 0; i < operators.size() - 1 && !driverContext.isDone(); i++) {
+                Operator current = operators.get(i);
                 Operator next = operators.get(i + 1);
-                blocked = next.isBlocked();
-                if (!blocked.isDone()) {
-                    next.getOperatorContext().recordBlocked(blocked);
-                    return blocked;
+
+                // skip blocked operators
+                if (!isBlocked(current).isDone()) {
+                    continue;
+                }
+                if (!isBlocked(next).isDone()) {
+                    continue;
                 }
 
                 // if the current operator is not finished and next operator needs input...
@@ -348,6 +383,7 @@ public class Driver
                         next.getOperatorContext().startIntervalTimer();
                         next.addInput(page);
                         next.getOperatorContext().recordAddInput(page);
+                        movedPage = true;
                     }
                 }
 
@@ -359,6 +395,33 @@ public class Driver
                     next.getOperatorContext().recordFinish();
                 }
             }
+
+            // if we did not move any pages, check if we are blocked
+            if (!movedPage) {
+                List<Operator> blockedOperators = new ArrayList<>();
+                List<ListenableFuture<?>> blockedFutures = new ArrayList<>();
+                for (Operator operator : operators) {
+                    ListenableFuture<?> blocked = isBlocked(operator);
+                    if (!blocked.isDone()) {
+                        blockedOperators.add(operator);
+                        blockedFutures.add(blocked);
+                    }
+                }
+
+                if (!blockedFutures.isEmpty()) {
+                    // unblock when the first future is complete
+                    ListenableFuture<?> blocked = firstFinishedFuture(blockedFutures);
+                    // driver records serial blocked time
+                    driverContext.recordBlocked(blocked);
+                    // each blocked operator is responsible for blocking the execution
+                    // until one of the operators can continue
+                    for (Operator operator : blockedOperators) {
+                        operator.getOperatorContext().recordBlocked(blocked);
+                    }
+                    return blocked;
+                }
+            }
+
             return NOT_BLOCKED;
         }
         catch (Throwable t) {
@@ -397,6 +460,28 @@ public class Driver
                             operator.getOperatorContext().getOperatorId(),
                             driverContext.getTaskId());
                 }
+                try {
+                    operator.getOperatorContext().setMemoryReservation(0);
+                }
+                catch (Throwable t) {
+                    inFlightException = addSuppressedException(
+                            inFlightException,
+                            t,
+                            "Error freeing memory for operator %s for task %s",
+                            operator.getOperatorContext().getOperatorId(),
+                            driverContext.getTaskId());
+                }
+                try {
+                    operator.getOperatorContext().closeSystemMemoryContext();
+                }
+                catch (Throwable t) {
+                    inFlightException = addSuppressedException(
+                            inFlightException,
+                            t,
+                            "Error freeing system memory for operator %s for task %s",
+                            operator.getOperatorContext().getOperatorId(),
+                            driverContext.getTaskId());
+                }
             }
             driverContext.finished();
         }
@@ -421,7 +506,16 @@ public class Driver
         }
     }
 
-    private Throwable addSuppressedException(Throwable inFlightException, Throwable newException, String message, Object... args)
+    private static ListenableFuture<?> isBlocked(Operator operator)
+    {
+        ListenableFuture<?> blocked = operator.isBlocked();
+        if (blocked.isDone()) {
+            blocked = operator.getOperatorContext().isWaitingForMemory();
+        }
+        return blocked;
+    }
+
+    private static Throwable addSuppressedException(Throwable inFlightException, Throwable newException, String message, Object... args)
     {
         if (newException instanceof Error) {
             if (inFlightException == null) {
@@ -456,6 +550,18 @@ public class Driver
     private synchronized void checkLockHeld(String message)
     {
         checkState(Thread.currentThread() == lockHolder, message);
+    }
+
+    private static ListenableFuture<?> firstFinishedFuture(List<ListenableFuture<?>> futures)
+    {
+        SettableFuture<?> result = SettableFuture.create();
+        ExecutorService executor = MoreExecutors.newDirectExecutorService();
+
+        for (ListenableFuture<?> future : futures) {
+            future.addListener(() -> result.set(null), executor);
+        }
+
+        return result;
     }
 
     private class DriverLockResult

@@ -62,31 +62,7 @@ public class TestKafkaDistributed
     }
 
     @Override
-    public void testCreateSampledTableAsSelectLimit()
-            throws Exception
-    {
-    }
-
-    @Override
     public void testCreateTableAsSelect()
-            throws Exception
-    {
-    }
-
-    @Override
-    public void testCreateTableAsSelectGroupBy()
-            throws Exception
-    {
-    }
-
-    @Override
-    public void testCreateTableAsSelectJoin()
-            throws Exception
-    {
-    }
-
-    @Override
-    public void testCreateTableAsSelectLimit()
             throws Exception
     {
     }
@@ -108,6 +84,20 @@ public class TestKafkaDistributed
     }
 
     @Override
+    public void testCompatibleTypeChangeForView()
+            throws Exception
+    {
+        // Kafka connector currently does not support views
+    }
+
+    @Override
+    public void testCompatibleTypeChangeForView2()
+            throws Exception
+    {
+        // Kafka connector currently does not support views
+    }
+
+    @Override
     public void testViewMetadata()
             throws Exception
     {
@@ -124,11 +114,41 @@ public class TestKafkaDistributed
     }
 
     //
+    // Kafka connector does not delete.
+    //
+
+    @Override
+    public void testDelete()
+            throws Exception
+    {
+    }
+
+    //
     // Kafka connector does not table rename.
     //
 
     @Override
     public void testRenameTable()
+            throws Exception
+    {
+    }
+
+    //
+    // Kafka connector does not rename column.
+    //
+
+    @Override
+    public void testRenameColumn()
+            throws Exception
+    {
+    }
+
+    //
+    // Kafka connector does not add column.
+    //
+
+    @Override
+    public void testAddColumn()
             throws Exception
     {
     }

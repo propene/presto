@@ -13,23 +13,24 @@
  */
 package com.facebook.presto.type;
 
-import com.facebook.presto.metadata.OperatorType;
-import com.facebook.presto.operator.scalar.ScalarFunction;
-import com.facebook.presto.operator.scalar.ScalarOperator;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.function.OperatorType;
+import com.facebook.presto.spi.function.ScalarFunction;
+import com.facebook.presto.spi.function.ScalarOperator;
+import com.facebook.presto.spi.function.SqlType;
 import com.facebook.presto.spi.type.StandardTypes;
+import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
+import io.airlift.joni.Option;
+import io.airlift.joni.Regex;
+import io.airlift.joni.Syntax;
 import io.airlift.slice.Slice;
-import org.jcodings.specific.UTF8Encoding;
-import org.joni.Option;
-import org.joni.Regex;
-import org.joni.Syntax;
 
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.airlift.joni.constants.MetaChar.INEFFECTIVE_META_CHAR;
+import static io.airlift.joni.constants.SyntaxProperties.OP_ASTERISK_ZERO_INF;
+import static io.airlift.joni.constants.SyntaxProperties.OP_DOT_ANYCHAR;
+import static io.airlift.joni.constants.SyntaxProperties.OP_LINE_ANCHOR;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.joni.constants.MetaChar.INEFFECTIVE_META_CHAR;
-import static org.joni.constants.SyntaxProperties.OP_ASTERISK_ZERO_INF;
-import static org.joni.constants.SyntaxProperties.OP_DOT_ANYCHAR;
-import static org.joni.constants.SyntaxProperties.OP_LINE_ANCHOR;
 
 public final class LikeFunctions
 {
@@ -55,13 +56,10 @@ public final class LikeFunctions
     @SqlType(StandardTypes.BOOLEAN)
     public static boolean like(@SqlType(StandardTypes.VARCHAR) Slice value, @SqlType(LikePatternType.NAME) Regex pattern)
     {
-        // Joni doesn't handle invalid UTF-8, so replace invalid characters
+        // Joni can infinite loop with UTF8Encoding when invalid UTF-8 is encountered.
+        // NonStrictUTF8Encoding must be used to avoid this issue.
         byte[] bytes = value.getBytes();
-        if (isAscii(bytes)) {
-            return regexMatches(pattern, bytes);
-        }
-        // convert to a String and back to "fix" any broken UTF-8 sequences
-        return regexMatches(pattern, value.toStringUtf8().getBytes(UTF_8));
+        return regexMatches(pattern, bytes);
     }
 
     @ScalarOperator(OperatorType.CAST)
@@ -123,13 +121,13 @@ public final class LikeFunctions
         regex.append('$');
 
         byte[] bytes = regex.toString().getBytes(UTF_8);
-        return new Regex(bytes, 0, bytes.length, Option.MULTILINE, UTF8Encoding.INSTANCE, SYNTAX);
+        return new Regex(bytes, 0, bytes.length, Option.MULTILINE, NonStrictUTF8Encoding.INSTANCE, SYNTAX);
     }
 
     @SuppressWarnings("NumericCastThatLosesPrecision")
     private static char getEscapeChar(Slice escape)
     {
-        String escapeString = escape.toString(UTF_8);
+        String escapeString = escape.toStringUtf8();
         if (escapeString.isEmpty()) {
             // escaping disabled
             return (char) -1; // invalid character
@@ -138,15 +136,5 @@ public final class LikeFunctions
             return escapeString.charAt(0);
         }
         throw new PrestoException(INVALID_FUNCTION_ARGUMENT, "Escape must be empty or a single character");
-    }
-
-    private static boolean isAscii(byte[] bytes)
-    {
-        for (byte b : bytes) {
-            if (b < 0) {
-                return false;
-            }
-        }
-        return true;
     }
 }

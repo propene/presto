@@ -53,42 +53,11 @@ public class SliceArrayBlockEncoding
 
         encodeNullsAsBits(sliceOutput, sliceArrayBlock);
 
-        // write last null bits
-        if ((positionCount & 0b111) > 0) {
-            byte value = 0;
-            int mask = 0b1000_0000;
-            for (int position = positionCount & ~0b111; position < positionCount; position++) {
-                value |= sliceArrayBlock.isNull(position) ? mask : 0;
-                mask >>>= 1;
-            }
-            sliceOutput.appendByte(value);
-        }
-
         for (Slice value : sliceArrayBlock.getValues()) {
             if (value != null) {
                 sliceOutput.writeBytes(value);
             }
         }
-    }
-
-    @Override
-    public int getEstimatedSize(Block block)
-    {
-        int positionCount = block.getPositionCount();
-
-        int size = 4; // positionCount integer bytes
-        int totalLength = 0;
-        for (int position = 0; position < positionCount; position++) {
-            if (!block.isNull(position)) {
-                totalLength += block.getLength(position);
-            }
-            size += 4; // length integer bytes
-        }
-
-        size += positionCount / 8 + 1; // one byte null bits per eight elements and possibly last null bits
-        size += totalLength;
-
-        return size;
     }
 
     @Override
@@ -114,6 +83,12 @@ public class SliceArrayBlockEncoding
         }
 
         return new SliceArrayBlock(positionCount, values);
+    }
+
+    @Override
+    public BlockEncodingFactory getFactory()
+    {
+        return FACTORY;
     }
 
     public static class SliceArrayBlockEncodingFactory

@@ -13,9 +13,11 @@
  */
 package com.facebook.presto.plugin.jdbc;
 
-import com.facebook.presto.spi.Connector;
-import com.facebook.presto.spi.ConnectorFactory;
+import com.facebook.presto.spi.ConnectorHandleResolver;
 import com.facebook.presto.spi.classloader.ThreadContextClassLoader;
+import com.facebook.presto.spi.connector.Connector;
+import com.facebook.presto.spi.connector.ConnectorContext;
+import com.facebook.presto.spi.connector.ConnectorFactory;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Injector;
@@ -25,8 +27,8 @@ import io.airlift.bootstrap.Bootstrap;
 import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static java.util.Objects.requireNonNull;
 
 public class JdbcConnectorFactory
         implements ConnectorFactory
@@ -40,9 +42,9 @@ public class JdbcConnectorFactory
     {
         checkArgument(!isNullOrEmpty(name), "name is null or empty");
         this.name = name;
-        this.module = checkNotNull(module, "module is null");
-        this.optionalConfig = ImmutableMap.copyOf(checkNotNull(optionalConfig, "optionalConfig is null"));
-        this.classLoader = checkNotNull(classLoader, "classLoader is null");
+        this.module = requireNonNull(module, "module is null");
+        this.optionalConfig = ImmutableMap.copyOf(requireNonNull(optionalConfig, "optionalConfig is null"));
+        this.classLoader = requireNonNull(classLoader, "classLoader is null");
     }
 
     @Override
@@ -52,10 +54,16 @@ public class JdbcConnectorFactory
     }
 
     @Override
-    public Connector create(String connectorId, Map<String, String> requiredConfig)
+    public ConnectorHandleResolver getHandleResolver()
     {
-        checkNotNull(requiredConfig, "requiredConfig is null");
-        checkNotNull(optionalConfig, "optionalConfig is null");
+        return new JdbcHandleResolver();
+    }
+
+    @Override
+    public Connector create(String connectorId, Map<String, String> requiredConfig, ConnectorContext context)
+    {
+        requireNonNull(requiredConfig, "requiredConfig is null");
+        requireNonNull(optionalConfig, "optionalConfig is null");
 
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             Bootstrap app = new Bootstrap(new JdbcModule(connectorId), module);

@@ -40,16 +40,19 @@ public final class StreamReaders
                 return new DoubleStreamReader(streamDescriptor);
             case BINARY:
             case STRING:
+            case VARCHAR:
                 return new SliceStreamReader(streamDescriptor);
             case TIMESTAMP:
                 return new TimestampStreamReader(streamDescriptor, hiveStorageTimeZone);
-            case STRUCT:
             case LIST:
+                return new ListStreamReader(streamDescriptor, hiveStorageTimeZone);
+            case STRUCT:
+                return new StructStreamReader(streamDescriptor, hiveStorageTimeZone);
             case MAP:
-                return new BlockStreamReader(streamDescriptor, hiveStorageTimeZone);
+                return new MapStreamReader(streamDescriptor, hiveStorageTimeZone);
             case UNION:
             case DECIMAL:
-            case VARCHAR:
+                return new DecimalStreamReader(streamDescriptor);
             case CHAR:
             default:
                 throw new IllegalArgumentException("Unsupported type: " + streamDescriptor.getStreamType());

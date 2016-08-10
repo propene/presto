@@ -15,12 +15,14 @@ package com.facebook.presto.raptor.storage;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.DefunctConfig;
+import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.airlift.units.MaxDataSize;
 import io.airlift.units.MinDataSize;
+import io.airlift.units.MinDuration;
 
-import javax.annotation.Nullable;
 import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
@@ -29,19 +31,31 @@ import java.io.File;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.lang.Math.max;
+import static java.lang.Runtime.getRuntime;
 
+@DefunctConfig("storage.backup-directory")
 public class StorageManagerConfig
 {
     private File dataDirectory;
-    private File backupDirectory;
     private Duration shardRecoveryTimeout = new Duration(30, TimeUnit.SECONDS);
     private Duration missingShardDiscoveryInterval = new Duration(5, TimeUnit.MINUTES);
+    private boolean compactionEnabled = true;
+    private Duration compactionInterval = new Duration(1, TimeUnit.HOURS);
+    private Duration shardEjectorInterval = new Duration(4, TimeUnit.HOURS);
     private DataSize orcMaxMergeDistance = new DataSize(1, MEGABYTE);
+    private DataSize orcMaxReadSize = new DataSize(8, MEGABYTE);
+    private DataSize orcStreamBufferSize = new DataSize(8, MEGABYTE);
+    private int deletionThreads = max(1, getRuntime().availableProcessors() / 2);
     private int recoveryThreads = 10;
+    private int organizationThreads = 5;
+    private boolean organizationEnabled = true;
+    private Duration organizationInterval = new Duration(7, TimeUnit.DAYS);
 
     private long maxShardRows = 1_000_000;
     private DataSize maxShardSize = new DataSize(256, MEGABYTE);
     private DataSize maxBufferSize = new DataSize(256, MEGABYTE);
+    private int oneSplitPerBucketThreshold;
 
     @NotNull
     public File getDataDirectory()
@@ -54,20 +68,6 @@ public class StorageManagerConfig
     public StorageManagerConfig setDataDirectory(File dataDirectory)
     {
         this.dataDirectory = dataDirectory;
-        return this;
-    }
-
-    @Nullable
-    public File getBackupDirectory()
-    {
-        return backupDirectory;
-    }
-
-    @Config("storage.backup-directory")
-    @ConfigDescription("Base directory to use for the backup copy of shard data")
-    public StorageManagerConfig setBackupDirectory(File backupDirectory)
-    {
-        this.backupDirectory = backupDirectory;
         return this;
     }
 
@@ -84,6 +84,47 @@ public class StorageManagerConfig
         return this;
     }
 
+    @NotNull
+    public DataSize getOrcMaxReadSize()
+    {
+        return orcMaxReadSize;
+    }
+
+    @Config("storage.orc.max-read-size")
+    public StorageManagerConfig setOrcMaxReadSize(DataSize orcMaxReadSize)
+    {
+        this.orcMaxReadSize = orcMaxReadSize;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getOrcStreamBufferSize()
+    {
+        return orcStreamBufferSize;
+    }
+
+    @Config("storage.orc.stream-buffer-size")
+    public StorageManagerConfig setOrcStreamBufferSize(DataSize orcStreamBufferSize)
+    {
+        this.orcStreamBufferSize = orcStreamBufferSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getDeletionThreads()
+    {
+        return deletionThreads;
+    }
+
+    @Config("storage.max-deletion-threads")
+    @ConfigDescription("Maximum number of threads to use for deletions")
+    public StorageManagerConfig setDeletionThreads(int deletionThreads)
+    {
+        this.deletionThreads = deletionThreads;
+        return this;
+    }
+
+    @MinDuration("1s")
     public Duration getShardRecoveryTimeout()
     {
         return shardRecoveryTimeout;
@@ -97,6 +138,7 @@ public class StorageManagerConfig
         return this;
     }
 
+    @MinDuration("1s")
     public Duration getMissingShardDiscoveryInterval()
     {
         return missingShardDiscoveryInterval;
@@ -107,6 +149,49 @@ public class StorageManagerConfig
     public StorageManagerConfig setMissingShardDiscoveryInterval(Duration missingShardDiscoveryInterval)
     {
         this.missingShardDiscoveryInterval = missingShardDiscoveryInterval;
+        return this;
+    }
+
+    @MinDuration("1s")
+    public Duration getCompactionInterval()
+    {
+        return compactionInterval;
+    }
+
+    @Config("storage.compaction-interval")
+    @ConfigDescription("How often to check for local shards that need compaction")
+    public StorageManagerConfig setCompactionInterval(Duration compactionInterval)
+    {
+        this.compactionInterval = compactionInterval;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1s")
+    public Duration getOrganizationInterval()
+    {
+        return organizationInterval;
+    }
+
+    @Config("storage.organization-interval")
+    @ConfigDescription("How long to wait between table organization iterations")
+    public StorageManagerConfig setOrganizationInterval(Duration organizationInterval)
+    {
+        this.organizationInterval = organizationInterval;
+        return this;
+    }
+
+    @MinDuration("5m")
+    public Duration getShardEjectorInterval()
+    {
+        return shardEjectorInterval;
+    }
+
+    @Config("storage.ejector-interval")
+    @ConfigDescription("How often to check for local shards that need ejection to balance capacity")
+    public StorageManagerConfig setShardEjectorInterval(Duration shardEjectorInterval)
+    {
+        this.shardEjectorInterval = shardEjectorInterval;
         return this;
     }
 
@@ -122,6 +207,21 @@ public class StorageManagerConfig
     {
         this.recoveryThreads = recoveryThreads;
         return this;
+    }
+
+    @LegacyConfig("storage.max-compaction-threads")
+    @Config("storage.max-organization-threads")
+    @ConfigDescription("Maximum number of threads to use for organization")
+    public StorageManagerConfig setOrganizationThreads(int organizationThreads)
+    {
+        this.organizationThreads = organizationThreads;
+        return this;
+    }
+
+    @Min(1)
+    public int getOrganizationThreads()
+    {
+        return organizationThreads;
     }
 
     @Min(1)
@@ -165,6 +265,43 @@ public class StorageManagerConfig
     public StorageManagerConfig setMaxBufferSize(DataSize maxBufferSize)
     {
         this.maxBufferSize = maxBufferSize;
+        return this;
+    }
+
+    public boolean isCompactionEnabled()
+    {
+        return compactionEnabled;
+    }
+
+    @Config("storage.compaction-enabled")
+    public StorageManagerConfig setCompactionEnabled(boolean compactionEnabled)
+    {
+        this.compactionEnabled = compactionEnabled;
+        return this;
+    }
+
+    public boolean isOrganizationEnabled()
+    {
+        return organizationEnabled;
+    }
+
+    @Config("storage.organization-enabled")
+    public StorageManagerConfig setOrganizationEnabled(boolean organizationEnabled)
+    {
+        this.organizationEnabled = organizationEnabled;
+        return this;
+    }
+
+    public int getOneSplitPerBucketThreshold()
+    {
+        return oneSplitPerBucketThreshold;
+    }
+
+    @Config("storage.one-split-per-bucket-threshold")
+    @ConfigDescription("Experimental: Maximum bucket count at which to produce multiple splits per bucket")
+    public StorageManagerConfig setOneSplitPerBucketThreshold(int oneSplitPerBucketThreshold)
+    {
+        this.oneSplitPerBucketThreshold = oneSplitPerBucketThreshold;
         return this;
     }
 }

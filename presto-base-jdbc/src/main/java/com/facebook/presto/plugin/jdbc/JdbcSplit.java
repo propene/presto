@@ -13,10 +13,10 @@
  */
 package com.facebook.presto.plugin.jdbc;
 
-import com.facebook.presto.spi.ConnectorColumnHandle;
+import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.HostAddress;
-import com.facebook.presto.spi.TupleDomain;
+import com.facebook.presto.spi.predicate.TupleDomain;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
@@ -27,7 +27,7 @@ import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+import static java.util.Objects.requireNonNull;
 
 public class JdbcSplit
         implements ConnectorSplit
@@ -38,7 +38,7 @@ public class JdbcSplit
     private final String tableName;
     private final String connectionUrl;
     private final Map<String, String> connectionProperties;
-    private final TupleDomain<ConnectorColumnHandle> tupleDomain;
+    private final TupleDomain<ColumnHandle> tupleDomain;
 
     @JsonCreator
     public JdbcSplit(
@@ -48,15 +48,15 @@ public class JdbcSplit
             @JsonProperty("tableName") String tableName,
             @JsonProperty("connectionUrl") String connectionUrl,
             @JsonProperty("connectionProperties") Map<String, String> connectionProperties,
-            @JsonProperty("tupleDomain") TupleDomain<ConnectorColumnHandle> tupleDomain)
+            @JsonProperty("tupleDomain") TupleDomain<ColumnHandle> tupleDomain)
     {
-        this.connectorId = checkNotNull(connectorId, "connector id is null");
+        this.connectorId = requireNonNull(connectorId, "connector id is null");
         this.catalogName = catalogName;
         this.schemaName = schemaName;
-        this.tableName = checkNotNull(tableName, "table name is null");
-        this.connectionUrl = checkNotNull(connectionUrl, "connectionUrl is null");
-        this.connectionProperties = ImmutableMap.copyOf(checkNotNull(connectionProperties, "connectionProperties is null"));
-        this.tupleDomain = checkNotNull(tupleDomain, "tupleDomain is null");
+        this.tableName = requireNonNull(tableName, "table name is null");
+        this.connectionUrl = requireNonNull(connectionUrl, "connectionUrl is null");
+        this.connectionProperties = ImmutableMap.copyOf(requireNonNull(connectionProperties, "connectionProperties is null"));
+        this.tupleDomain = requireNonNull(tupleDomain, "tupleDomain is null");
     }
 
     @JsonProperty
@@ -98,7 +98,7 @@ public class JdbcSplit
     }
 
     @JsonProperty
-    public TupleDomain<ConnectorColumnHandle> getTupleDomain()
+    public TupleDomain<ColumnHandle> getTupleDomain()
     {
         return tupleDomain;
     }

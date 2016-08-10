@@ -99,7 +99,7 @@ This file lists the Kafka nodes and topics:
     connector.name=kafka
     kafka.nodes=localhost:9092
     kafka.table-names=tpch.customer,tpch.orders,tpch.lineitem,tpch.part,tpch.partsupp,tpch.supplier,tpch.nation,tpch.region
-    kafka.hide-internal-columns-hidden=false
+    kafka.hide-internal-columns=false
 
 Now start Presto:
 
@@ -579,7 +579,7 @@ RFC 2822 format as ``created_at`` attribute in each tweet.
 The topic definition file for the tweets table contains a mapping onto a
 timestamp using the ``rfc2822`` converter:
 
-.. code-block:: json
+.. code-block:: none
 
     ...
     {

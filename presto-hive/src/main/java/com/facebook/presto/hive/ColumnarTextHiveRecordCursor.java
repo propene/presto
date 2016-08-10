@@ -14,11 +14,15 @@
 package com.facebook.presto.hive;
 
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.block.Block;
+import com.facebook.presto.spi.type.DecimalType;
+import com.facebook.presto.spi.type.Decimals;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.spi.type.TypeManager;
 import com.google.common.base.Throwables;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.serde2.columnar.BytesRefArrayWritable;
 import org.apache.hadoop.hive.serde2.columnar.BytesRefWritable;
 import org.apache.hadoop.hive.serde2.lazy.ByteArrayRef;
@@ -30,6 +34,7 @@ import org.apache.hadoop.mapred.RecordReader;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -43,30 +48,45 @@ import static com.facebook.presto.hive.HiveUtil.bigintPartitionKey;
 import static com.facebook.presto.hive.HiveUtil.booleanPartitionKey;
 import static com.facebook.presto.hive.HiveUtil.datePartitionKey;
 import static com.facebook.presto.hive.HiveUtil.doublePartitionKey;
+import static com.facebook.presto.hive.HiveUtil.getPrefilledColumnValue;
 import static com.facebook.presto.hive.HiveUtil.getTableObjectInspector;
+import static com.facebook.presto.hive.HiveUtil.integerPartitionKey;
 import static com.facebook.presto.hive.HiveUtil.isStructuralType;
+import static com.facebook.presto.hive.HiveUtil.longDecimalPartitionKey;
 import static com.facebook.presto.hive.HiveUtil.parseHiveDate;
 import static com.facebook.presto.hive.HiveUtil.parseHiveTimestamp;
+import static com.facebook.presto.hive.HiveUtil.shortDecimalPartitionKey;
+import static com.facebook.presto.hive.HiveUtil.smallintPartitionKey;
 import static com.facebook.presto.hive.HiveUtil.timestampPartitionKey;
+import static com.facebook.presto.hive.HiveUtil.tinyintPartitionKey;
+import static com.facebook.presto.hive.HiveUtil.varcharPartitionKey;
 import static com.facebook.presto.hive.NumberParser.parseDouble;
 import static com.facebook.presto.hive.NumberParser.parseLong;
-import static com.facebook.presto.hive.util.SerDeUtils.getBlockSlice;
+import static com.facebook.presto.hive.util.SerDeUtils.getBlockObject;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.spi.type.DateType.DATE;
+import static com.facebook.presto.spi.type.Decimals.isLongDecimal;
+import static com.facebook.presto.spi.type.Decimals.isShortDecimal;
+import static com.facebook.presto.spi.type.Decimals.rescale;
 import static com.facebook.presto.spi.type.DoubleType.DOUBLE;
+import static com.facebook.presto.spi.type.IntegerType.INTEGER;
+import static com.facebook.presto.spi.type.SmallintType.SMALLINT;
+import static com.facebook.presto.spi.type.StandardTypes.DECIMAL;
 import static com.facebook.presto.spi.type.TimestampType.TIMESTAMP;
+import static com.facebook.presto.spi.type.TinyintType.TINYINT;
 import static com.facebook.presto.spi.type.VarbinaryType.VARBINARY;
-import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
+import static com.facebook.presto.spi.type.Varchars.isVarcharType;
+import static com.facebook.presto.spi.type.Varchars.truncateToLength;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Maps.uniqueIndex;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
 
 class ColumnarTextHiveRecordCursor<K>
         extends HiveRecordCursor
@@ -84,13 +104,14 @@ class ColumnarTextHiveRecordCursor<K>
 
     private final int[] hiveColumnIndexes;
 
-    private final boolean[] isPartitionColumn;
+    private final boolean[] isPrefilledColumn;
 
     private final boolean[] loaded;
     private final boolean[] booleans;
     private final long[] longs;
     private final double[] doubles;
     private final Slice[] slices;
+    private final Object[] objects;
     private final boolean[] nulls;
 
     private final long totalBytes;
@@ -106,14 +127,16 @@ class ColumnarTextHiveRecordCursor<K>
             List<HivePartitionKey> partitionKeys,
             List<HiveColumnHandle> columns,
             DateTimeZone hiveStorageTimeZone,
-            TypeManager typeManager)
+            TypeManager typeManager,
+            Path path)
     {
-        checkNotNull(recordReader, "recordReader is null");
+        requireNonNull(recordReader, "recordReader is null");
         checkArgument(totalBytes >= 0, "totalBytes is negative");
-        checkNotNull(splitSchema, "splitSchema is null");
-        checkNotNull(partitionKeys, "partitionKeys is null");
-        checkNotNull(columns, "columns is null");
-        checkNotNull(hiveStorageTimeZone, "hiveStorageTimeZone is null");
+        requireNonNull(splitSchema, "splitSchema is null");
+        requireNonNull(partitionKeys, "partitionKeys is null");
+        requireNonNull(columns, "columns is null");
+        requireNonNull(hiveStorageTimeZone, "hiveStorageTimeZone is null");
+        requireNonNull(path, "path is null");
 
         this.recordReader = recordReader;
         this.totalBytes = totalBytes;
@@ -131,13 +154,14 @@ class ColumnarTextHiveRecordCursor<K>
 
         this.hiveColumnIndexes = new int[size];
 
-        this.isPartitionColumn = new boolean[size];
+        this.isPrefilledColumn = new boolean[size];
 
         this.loaded = new boolean[size];
         this.booleans = new boolean[size];
         this.longs = new long[size];
         this.doubles = new double[size];
         this.slices = new Slice[size];
+        this.objects = new Object[size];
         this.nulls = new boolean[size];
 
         // initialize data columns
@@ -149,24 +173,23 @@ class ColumnarTextHiveRecordCursor<K>
             names[i] = column.getName();
             types[i] = typeManager.getType(column.getTypeSignature());
             hiveTypes[i] = column.getHiveType();
+            hiveColumnIndexes[i] = column.getHiveColumnIndex();
+            isPrefilledColumn[i] = column.isPartitionKey() || column.isHidden();
 
-            if (!column.isPartitionKey()) {
+            if (!isPrefilledColumn[i]) {
                 fieldInspectors[i] = rowInspector.getStructFieldRef(column.getName()).getFieldObjectInspector();
             }
-
-            hiveColumnIndexes[i] = column.getHiveColumnIndex();
-            isPartitionColumn[i] = column.isPartitionKey();
         }
 
         // parse requested partition columns
         Map<String, HivePartitionKey> partitionKeysByName = uniqueIndex(partitionKeys, HivePartitionKey::getName);
         for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
             HiveColumnHandle column = columns.get(columnIndex);
-            if (column.isPartitionKey()) {
+            if (isPrefilledColumn[columnIndex]) {
                 HivePartitionKey partitionKey = partitionKeysByName.get(column.getName());
-                checkArgument(partitionKey != null, "Unknown partition key %s", column.getName());
 
-                byte[] bytes = partitionKey.getValue().getBytes(UTF_8);
+                String columnValue = getPrefilledColumnValue(column, partitionKey, path);
+                byte[] bytes = columnValue.getBytes(UTF_8);
 
                 String name = names[columnIndex];
                 Type type = types[columnIndex];
@@ -174,25 +197,40 @@ class ColumnarTextHiveRecordCursor<K>
                     nulls[columnIndex] = true;
                 }
                 else if (BOOLEAN.equals(type)) {
-                    booleans[columnIndex] = booleanPartitionKey(partitionKey.getValue(), name);
+                    booleans[columnIndex] = booleanPartitionKey(columnValue, name);
+                }
+                else if (TINYINT.equals(type)) {
+                    longs[columnIndex] = tinyintPartitionKey(columnValue, name);
+                }
+                else if (SMALLINT.equals(type)) {
+                    longs[columnIndex] = smallintPartitionKey(columnValue, name);
+                }
+                else if (INTEGER.equals(type)) {
+                    longs[columnIndex] = integerPartitionKey(columnValue, name);
                 }
                 else if (BIGINT.equals(type)) {
-                    longs[columnIndex] = bigintPartitionKey(partitionKey.getValue(), name);
+                    longs[columnIndex] = bigintPartitionKey(columnValue, name);
                 }
                 else if (DOUBLE.equals(type)) {
-                    doubles[columnIndex] = doublePartitionKey(partitionKey.getValue(), name);
+                    doubles[columnIndex] = doublePartitionKey(columnValue, name);
                 }
-                else if (VARCHAR.equals(type)) {
-                    slices[columnIndex] = Slices.wrappedBuffer(bytes);
+                else if (isVarcharType(type)) {
+                    slices[columnIndex] = varcharPartitionKey(columnValue, name, type);
                 }
                 else if (DATE.equals(type)) {
-                    longs[columnIndex] = datePartitionKey(partitionKey.getValue(), name);
+                    longs[columnIndex] = datePartitionKey(columnValue, name);
                 }
                 else if (TIMESTAMP.equals(type)) {
-                    longs[columnIndex] = timestampPartitionKey(partitionKey.getValue(), hiveStorageTimeZone, name);
+                    longs[columnIndex] = timestampPartitionKey(columnValue, hiveStorageTimeZone, name);
+                }
+                else if (isShortDecimal(type)) {
+                    longs[columnIndex] = shortDecimalPartitionKey(columnValue, (DecimalType) type, name);
+                }
+                else if (isLongDecimal(type)) {
+                    slices[columnIndex] = longDecimalPartitionKey(columnValue, (DecimalType) type, name);
                 }
                 else {
-                    throw new PrestoException(NOT_SUPPORTED, format("Unsupported column type %s for partition key: %s", type.getDisplayName(), name));
+                    throw new PrestoException(NOT_SUPPORTED, format("Unsupported column type %s for prefilled column: %s", type.getDisplayName(), name));
                 }
             }
         }
@@ -239,8 +277,8 @@ class ColumnarTextHiveRecordCursor<K>
             }
 
             // reset loaded flags
-            // partition keys are already loaded, but everything else is not
-            System.arraycopy(isPartitionColumn, 0, loaded, 0, isPartitionColumn.length);
+            // prefilled values are already loaded, but everything else is not
+            System.arraycopy(isPrefilledColumn, 0, loaded, 0, isPrefilledColumn.length);
 
             return true;
         }
@@ -265,7 +303,7 @@ class ColumnarTextHiveRecordCursor<K>
     private void parseBooleanColumn(int column)
     {
         // don't include column number in message because it causes boxing which is expensive here
-        checkArgument(!isPartitionColumn[column], "Column is a partition key");
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
 
         loaded[column] = true;
 
@@ -314,9 +352,16 @@ class ColumnarTextHiveRecordCursor<K>
     {
         checkState(!closed, "Cursor is closed");
 
-        if (!types[fieldId].equals(BIGINT) && !types[fieldId].equals(DATE) && !types[fieldId].equals(TIMESTAMP)) {
+        if (!types[fieldId].equals(BIGINT) &&
+                !types[fieldId].equals(INTEGER) &&
+                !types[fieldId].equals(SMALLINT) &&
+                !types[fieldId].equals(TINYINT) &&
+                !types[fieldId].equals(DATE) &&
+                !types[fieldId].equals(TIMESTAMP) &&
+                !isShortDecimal(types[fieldId])) {
             // we don't use Preconditions.checkArgument because it requires boxing fieldId, which affects inner loop performance
-            throw new IllegalArgumentException(String.format("Expected field to be %s, %s or %s , actual %s (field %s)", BIGINT, DATE, TIMESTAMP, types[fieldId], fieldId));
+            throw new IllegalArgumentException(
+                    format("Expected field to be %s, %s, %s, %s, %s, %s, or %s , actual %s (field %s)", TINYINT, SMALLINT, INTEGER, BIGINT, DECIMAL, DATE, TIMESTAMP, types[fieldId], fieldId));
         }
 
         if (!loaded[fieldId]) {
@@ -328,7 +373,7 @@ class ColumnarTextHiveRecordCursor<K>
     private void parseLongColumn(int column)
     {
         // don't include column number in message because it causes boxing which is expensive here
-        checkArgument(!isPartitionColumn[column], "Column is a partition key");
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
 
         loaded[column] = true;
 
@@ -393,7 +438,7 @@ class ColumnarTextHiveRecordCursor<K>
     private void parseDoubleColumn(int column)
     {
         // don't include column number in message because it causes boxing which is expensive here
-        checkArgument(!isPartitionColumn[column], "Column is a partition key");
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
 
         loaded[column] = true;
 
@@ -448,7 +493,7 @@ class ColumnarTextHiveRecordCursor<K>
     private void parseStringColumn(int column)
     {
         // don't include column number in message because it causes boxing which is expensive here
-        checkArgument(!isPartitionColumn[column], "Column is a partition key");
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
 
         loaded[column] = true;
 
@@ -481,27 +526,135 @@ class ColumnarTextHiveRecordCursor<K>
         if (length == "\\N".length() && bytes[start] == '\\' && bytes[start + 1] == 'N') {
             wasNull = true;
         }
-        else if (isStructuralType(hiveTypes[column])) {
-            LazyObject<? extends ObjectInspector> lazyObject = LazyFactory.createLazyObject(fieldInspectors[column]);
-            ByteArrayRef byteArrayRef = new ByteArrayRef();
-            byteArrayRef.setData(bytes);
-            lazyObject.init(byteArrayRef, start, length);
-            slices[column] = getBlockSlice(lazyObject.getObject(), fieldInspectors[column]);
-            wasNull = false;
-        }
         else {
-            slices[column] = Slices.wrappedBuffer(Arrays.copyOfRange(bytes, start, start + length));
-
+            Type type = types[column];
+            Slice value = Slices.wrappedBuffer(Arrays.copyOfRange(bytes, start, start + length));
+            if (isVarcharType(type)) {
+                slices[column] = truncateToLength(value, type);
+            }
             // this is unbelievably stupid but Hive base64 encodes binary data in a binary file format
-            if (hiveTypes[column].equals(HiveType.HIVE_BINARY)) {
+            else if (type.equals(VARBINARY)) {
                 // and yes we end up with an extra copy here because the Base64 only handles whole arrays
-                slices[column] = base64Decode(slices[column].getBytes());
+                slices[column] = base64Decode(value.getBytes());
+            }
+            else {
+                slices[column] = value;
             }
             wasNull = false;
         }
         nulls[column] = wasNull;
     }
 
+    private void parseDecimalColumn(int column)
+    {
+        // don't include column number in message because it causes boxing which is expensive here
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
+
+        loaded[column] = true;
+
+        if (hiveColumnIndexes[column] >= value.size()) {
+            // this partition may contain fewer fields than what's declared in the schema
+            // this happens when additional columns are added to the hive table after a partition has been created
+            nulls[column] = true;
+        }
+        else {
+            BytesRefWritable fieldData = value.unCheckedGet(hiveColumnIndexes[column]);
+
+            byte[] bytes;
+            try {
+                bytes = fieldData.getData();
+            }
+            catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
+
+            int start = fieldData.getStart();
+            int length = fieldData.getLength();
+
+            parseDecimalColumn(column, bytes, start, length);
+        }
+    }
+
+    private void parseDecimalColumn(int column, byte[] bytes, int start, int length)
+    {
+        boolean wasNull;
+        if (length == 0 || (length == "\\N".length() && bytes[start] == '\\' && bytes[start + 1] == 'N')) {
+            wasNull = true;
+        }
+        else {
+            DecimalType columnType = (DecimalType) types[column];
+            BigDecimal decimal = rescale(new BigDecimal(new String(bytes, start, length, UTF_8)), columnType);
+
+            if (columnType.isShort()) {
+                longs[column] = decimal.unscaledValue().longValue();
+            }
+            else {
+                slices[column] = Decimals.encodeUnscaledValue(decimal.unscaledValue());
+            }
+
+            wasNull = false;
+        }
+        nulls[column] = wasNull;
+    }
+
+    @Override
+    public Object getObject(int fieldId)
+    {
+        checkState(!closed, "Cursor is closed");
+
+        validateType(fieldId, Block.class);
+        if (!loaded[fieldId]) {
+            parseObjectColumn(fieldId);
+        }
+        return objects[fieldId];
+    }
+
+    private void parseObjectColumn(int column)
+    {
+        // don't include column number in message because it causes boxing which is expensive here
+        checkArgument(!isPrefilledColumn[column], "Column is prefilled");
+
+        loaded[column] = true;
+
+        if (hiveColumnIndexes[column] >= value.size()) {
+            // this partition may contain fewer fields than what's declared in the schema
+            // this happens when additional columns are added to the hive table after a partition has been created
+            nulls[column] = true;
+        }
+        else {
+            BytesRefWritable fieldData = value.unCheckedGet(hiveColumnIndexes[column]);
+
+            byte[] bytes;
+            try {
+                bytes = fieldData.getData();
+            }
+            catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
+
+            int start = fieldData.getStart();
+            int length = fieldData.getLength();
+
+            parseObjectColumn(column, bytes, start, length);
+        }
+    }
+
+    private void parseObjectColumn(int column, byte[] bytes, int start, int length)
+    {
+        boolean wasNull;
+        if (length == "\\N".length() && bytes[start] == '\\' && bytes[start + 1] == 'N') {
+            wasNull = true;
+        }
+        else {
+            LazyObject<? extends ObjectInspector> lazyObject = LazyFactory.createLazyObject(fieldInspectors[column]);
+            ByteArrayRef byteArrayRef = new ByteArrayRef();
+            byteArrayRef.setData(bytes);
+            lazyObject.init(byteArrayRef, start, length);
+            objects[column] = getBlockObject(types[column], lazyObject.getObject(), fieldInspectors[column]);
+            wasNull = false;
+        }
+        nulls[column] = wasNull;
+    }
     @Override
     public boolean isNull(int fieldId)
     {
@@ -522,17 +675,32 @@ class ColumnarTextHiveRecordCursor<K>
         else if (type.equals(BIGINT)) {
             parseLongColumn(column);
         }
+        else if (type.equals(INTEGER)) {
+            parseLongColumn(column);
+        }
+        else if (type.equals(SMALLINT)) {
+            parseLongColumn(column);
+        }
+        else if (type.equals(TINYINT)) {
+            parseLongColumn(column);
+        }
         else if (type.equals(DOUBLE)) {
             parseDoubleColumn(column);
         }
-        else if (VARCHAR.equals(type) || VARBINARY.equals(type) || isStructuralType(hiveTypes[column])) {
+        else if (isVarcharType(type) || VARBINARY.equals(type)) {
             parseStringColumn(column);
+        }
+        else if (isStructuralType(hiveTypes[column])) {
+            parseObjectColumn(column);
         }
         else if (type.equals(DATE)) {
             parseLongColumn(column);
         }
         else if (type.equals(TIMESTAMP)) {
             parseLongColumn(column);
+        }
+        else if (type instanceof DecimalType) {
+            parseDecimalColumn(column);
         }
         else {
             throw new UnsupportedOperationException("Unsupported column type: " + type);

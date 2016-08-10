@@ -14,10 +14,15 @@
 package com.facebook.presto.hive.orc;
 
 import com.facebook.presto.orc.AbstractOrcDataSource;
+import com.facebook.presto.spi.PrestoException;
 import io.airlift.units.DataSize;
 import org.apache.hadoop.fs.FSDataInputStream;
 
 import java.io.IOException;
+
+import static com.facebook.presto.hive.HiveErrorCode.HIVE_MISSING_DATA;
+import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNKNOWN_ERROR;
+import static java.lang.String.format;
 
 public class HdfsOrcDataSource
         extends AbstractOrcDataSource
@@ -31,9 +36,29 @@ public class HdfsOrcDataSource
     }
 
     @Override
+    public void close()
+            throws IOException
+    {
+        inputStream.close();
+    }
+
+    @Override
     protected void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
             throws IOException
     {
-        inputStream.readFully(position, buffer, bufferOffset, bufferLength);
+        try {
+            inputStream.readFully(position, buffer, bufferOffset, bufferLength);
+        }
+        catch (PrestoException e) {
+            // just in case there is a Presto wrapper or hook
+            throw e;
+        }
+        catch (Exception e) {
+            String message = format("HDFS error reading from %s at position %s", this, position);
+            if (e.getClass().getSimpleName().equals("BlockMissingException")) {
+                throw new PrestoException(HIVE_MISSING_DATA, message, e);
+            }
+            throw new PrestoException(HIVE_UNKNOWN_ERROR, message, e);
+        }
     }
 }

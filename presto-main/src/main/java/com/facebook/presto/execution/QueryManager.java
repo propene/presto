@@ -17,11 +17,10 @@ import com.facebook.presto.Session;
 import io.airlift.units.Duration;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface QueryManager
 {
-    List<QueryId> getAllQueryIds();
-
     List<QueryInfo> getAllQueryInfo();
 
     Duration waitForStateChange(QueryId queryId, QueryState currentState, Duration maxWait)
@@ -29,9 +28,15 @@ public interface QueryManager
 
     QueryInfo getQueryInfo(QueryId queryId);
 
+    Optional<QueryState> getQueryState(QueryId queryId);
+
+    void recordHeartbeat(QueryId queryId);
+
     QueryInfo createQuery(Session session, String query);
 
     void cancelQuery(QueryId queryId);
 
     void cancelStage(StageId stageId);
+
+    SqlQueryManagerStats getStats();
 }

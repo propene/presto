@@ -13,10 +13,10 @@
  */
 package com.facebook.presto.operator;
 
-import com.facebook.presto.execution.TaskId;
 import com.facebook.presto.spi.InMemoryRecordSet;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.sql.planner.plan.PlanNodeId;
 import com.facebook.presto.testing.MaterializedResult;
 import com.facebook.presto.util.InfiniteRecordSet;
 import com.google.common.collect.ImmutableList;
@@ -31,6 +31,7 @@ import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.spi.type.BigintType.BIGINT;
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
+import static com.facebook.presto.testing.TestingTaskContext.createTaskContext;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.testng.Assert.assertEquals;
@@ -47,7 +48,7 @@ public class TestRecordProjectOperator
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed("test-%s"));
-        driverContext = new TaskContext(new TaskId("query", "stage", "task"), executor, TEST_SESSION)
+        driverContext = createTaskContext(executor, TEST_SESSION)
                 .addPipelineContext(true, true)
                 .addDriverContext();
     }
@@ -65,7 +66,7 @@ public class TestRecordProjectOperator
         InMemoryRecordSet records = new InMemoryRecordSet(ImmutableList.of(VARCHAR), ImmutableList.copyOf(new List<?>[] {ImmutableList.of("abc"), ImmutableList.of("def"),
                                                                                                                         ImmutableList.of("g")}));
 
-        OperatorContext operatorContext = driverContext.addOperatorContext(0, RecordProjectOperator.class.getSimpleName());
+        OperatorContext operatorContext = driverContext.addOperatorContext(0, new PlanNodeId("test"), RecordProjectOperator.class.getSimpleName());
         Operator operator = new RecordProjectOperator(operatorContext, records);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR)
@@ -86,13 +87,13 @@ public class TestRecordProjectOperator
                 ImmutableList.of("def", 2L),
                 ImmutableList.of("g", 0L)));
 
-        OperatorContext operatorContext = driverContext.addOperatorContext(0, RecordProjectOperator.class.getSimpleName());
+        OperatorContext operatorContext = driverContext.addOperatorContext(0, new PlanNodeId("test"), RecordProjectOperator.class.getSimpleName());
         Operator operator = new RecordProjectOperator(operatorContext, records);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), VARCHAR, BIGINT)
-                .row("abc", 1)
-                .row("def", 2)
-                .row("g", 0)
+                .row("abc", 1L)
+                .row("def", 2L)
+                .row("g", 0L)
                 .build();
 
         OperatorAssertion.assertOperatorEquals(operator, expected);
@@ -104,7 +105,7 @@ public class TestRecordProjectOperator
     {
         InfiniteRecordSet records = new InfiniteRecordSet(ImmutableList.<Type>of(VARCHAR, BIGINT), ImmutableList.of("abc", 1L));
 
-        OperatorContext operatorContext = driverContext.addOperatorContext(0, RecordProjectOperator.class.getSimpleName());
+        OperatorContext operatorContext = driverContext.addOperatorContext(0, new PlanNodeId("test"), RecordProjectOperator.class.getSimpleName());
         Operator operator = new RecordProjectOperator(operatorContext, records);
 
         // verify initial state

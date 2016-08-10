@@ -18,9 +18,12 @@ import com.facebook.presto.operator.aggregation.state.NullableLongState;
 import com.facebook.presto.spi.block.Block;
 import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.block.BlockBuilderStatus;
+import com.facebook.presto.spi.function.AggregationFunction;
+import com.facebook.presto.spi.function.CombineFunction;
+import com.facebook.presto.spi.function.InputFunction;
+import com.facebook.presto.spi.function.OutputFunction;
+import com.facebook.presto.spi.function.SqlType;
 import com.facebook.presto.spi.type.StandardTypes;
-import com.facebook.presto.type.SqlType;
-import com.facebook.presto.type.TypeRegistry;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.BeforeClass;
 
@@ -34,18 +37,17 @@ public class TestCountNullAggregation
     @BeforeClass
     public void setup()
     {
-        InternalAggregationFunction function = new AggregationCompiler().generateAggregationFunction(CountNull.class);
-        functionRegistry.addFunctions(new FunctionListBuilder(new TypeRegistry()).aggregate(function).getFunctions());
+        functionRegistry.addFunctions(new FunctionListBuilder().aggregate(CountNull.class).getFunctions());
     }
 
     @Override
-    public Block getSequenceBlock(int start, int length)
+    public Block[] getSequenceBlocks(int start, int length)
     {
         BlockBuilder blockBuilder = BIGINT.createBlockBuilder(new BlockBuilderStatus(), length);
         for (int i = start; i < start + length; i++) {
             BIGINT.writeLong(blockBuilder, i);
         }
-        return blockBuilder.build();
+        return new Block[] {blockBuilder.build()};
     }
 
     @Override
@@ -69,7 +71,7 @@ public class TestCountNullAggregation
         private CountNull() {}
 
         @InputFunction
-        public static void input(NullableLongState state, @NullablePosition @SqlType(StandardTypes.BIGINT) Block block, @BlockIndex int position)
+        public static void input(NullableLongState state, @BlockPosition @NullablePosition @SqlType(StandardTypes.BIGINT) Block block, @BlockIndex int position)
         {
             if (block.isNull(position)) {
                 state.setLong(state.getLong() + 1);
@@ -82,6 +84,12 @@ public class TestCountNullAggregation
         {
             state.setLong(state.getLong() + scratchState.getLong());
             state.setNull(state.isNull() && scratchState.isNull());
+        }
+
+        @OutputFunction(StandardTypes.BIGINT)
+        public static void output(NullableLongState state, BlockBuilder out)
+        {
+            NullableLongState.write(BIGINT, state, out);
         }
     }
 

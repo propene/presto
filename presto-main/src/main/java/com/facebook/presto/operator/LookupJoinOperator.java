@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.operator;
 
+import com.facebook.presto.operator.LookupJoinOperators.JoinType;
 import com.facebook.presto.spi.Page;
 import com.facebook.presto.spi.PageBuilder;
 import com.facebook.presto.spi.type.Type;
@@ -22,48 +23,51 @@ import com.google.common.util.concurrent.ListenableFuture;
 import java.io.Closeable;
 import java.util.List;
 
-import static com.facebook.presto.util.MoreFutures.tryGetUnchecked;
-import static com.google.common.base.Preconditions.checkNotNull;
+import static com.facebook.presto.operator.LookupJoinOperators.JoinType.FULL_OUTER;
+import static com.facebook.presto.operator.LookupJoinOperators.JoinType.PROBE_OUTER;
 import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
+import static java.util.Objects.requireNonNull;
 
 public class LookupJoinOperator
         implements Operator, Closeable
 {
-    private final ListenableFuture<LookupSource> lookupSourceFuture;
-
     private final OperatorContext operatorContext;
-    private final JoinProbeFactory joinProbeFactory;
-    private final boolean enableOuterJoin;
     private final List<Type> types;
+    private final ListenableFuture<? extends LookupSource> lookupSourceFuture;
+    private final JoinProbeFactory joinProbeFactory;
+    private final Runnable onClose;
+
     private final PageBuilder pageBuilder;
+
+    private final boolean probeOnOuterSide;
 
     private LookupSource lookupSource;
     private JoinProbe probe;
 
+    private boolean closed;
     private boolean finishing;
     private long joinPosition = -1;
 
     public LookupJoinOperator(
             OperatorContext operatorContext,
-            LookupSourceSupplier lookupSourceSupplier,
-            List<Type> probeTypes,
-            boolean enableOuterJoin,
-            JoinProbeFactory joinProbeFactory)
+            List<Type> types,
+            JoinType joinType,
+            ListenableFuture<LookupSource> lookupSourceFuture,
+            JoinProbeFactory joinProbeFactory,
+            Runnable onClose)
     {
-        this.operatorContext = checkNotNull(operatorContext, "operatorContext is null");
+        this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
+        this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
 
-        // todo pass in desired projection
-        checkNotNull(lookupSourceSupplier, "lookupSourceSupplier is null");
-        checkNotNull(probeTypes, "probeTypes is null");
+        requireNonNull(joinType, "joinType is null");
+        // Cannot use switch case here, because javac will synthesize an inner class and cause IllegalAccessError
+        probeOnOuterSide = joinType == PROBE_OUTER || joinType == FULL_OUTER;
 
-        this.lookupSourceFuture = lookupSourceSupplier.getLookupSource(operatorContext);
-        this.joinProbeFactory = joinProbeFactory;
-        this.enableOuterJoin = enableOuterJoin;
+        this.lookupSourceFuture = requireNonNull(lookupSourceFuture, "lookupSourceFuture is null");
+        this.joinProbeFactory = requireNonNull(joinProbeFactory, "joinProbeFactory is null");
+        this.onClose = requireNonNull(onClose, "onClose is null");
 
-        this.types = ImmutableList.<Type>builder()
-                .addAll(probeTypes)
-                .addAll(lookupSourceSupplier.getTypes())
-                .build();
         this.pageBuilder = new PageBuilder(types);
     }
 
@@ -92,12 +96,7 @@ public class LookupJoinOperator
 
         // if finished drop references so memory is freed early
         if (finished) {
-            if (lookupSource != null) {
-                lookupSource.close();
-                lookupSource = null;
-            }
-            probe = null;
-            pageBuilder.reset();
+            close();
         }
         return finished;
     }
@@ -116,7 +115,7 @@ public class LookupJoinOperator
         }
 
         if (lookupSource == null) {
-            lookupSource = tryGetUnchecked(lookupSourceFuture);
+            lookupSource = tryGetFutureValue(lookupSourceFuture).orElse(null);
         }
         return lookupSource != null && probe == null;
     }
@@ -124,7 +123,7 @@ public class LookupJoinOperator
     @Override
     public void addInput(Page page)
     {
-        checkNotNull(page, "page is null");
+        requireNonNull(page, "page is null");
         checkState(!finishing, "Operator is finishing");
         checkState(lookupSource != null, "Lookup source has not been built yet");
         checkState(probe == null, "Current page has not been completely processed yet");
@@ -139,6 +138,10 @@ public class LookupJoinOperator
     @Override
     public Page getOutput()
     {
+        if (lookupSource == null) {
+            return null;
+        }
+
         // join probe page with the lookup source
         if (probe != null) {
             while (joinCurrentPosition()) {
@@ -164,9 +167,17 @@ public class LookupJoinOperator
     @Override
     public void close()
     {
+        // Closing the lookupSource is always safe to do, but we don't want to release the supplier multiple times, since its reference counted
+        if (closed) {
+            return;
+        }
+        closed = true;
+        probe = null;
+        pageBuilder.reset();
+        onClose.run();
+        // closing lookup source is only here for index join
         if (lookupSource != null) {
             lookupSource.close();
-            lookupSource = null;
         }
     }
 
@@ -183,7 +194,7 @@ public class LookupJoinOperator
             lookupSource.appendTo(joinPosition, pageBuilder, probe.getChannelCount());
 
             // get next join position for this row
-            joinPosition = lookupSource.getNextJoinPosition(joinPosition);
+            joinPosition = lookupSource.getNextJoinPosition(joinPosition, probe.getPosition(), probe.getPage());
             if (pageBuilder.isFull()) {
                 return false;
             }
@@ -205,7 +216,7 @@ public class LookupJoinOperator
 
     private boolean outerJoinCurrentPosition()
     {
-        if (enableOuterJoin && joinPosition < 0) {
+        if (probeOnOuterSide && joinPosition < 0) {
             // write probe columns
             pageBuilder.declarePosition();
             probe.appendTo(pageBuilder);

@@ -13,19 +13,19 @@
  */
 package com.facebook.presto.split;
 
-import com.facebook.presto.metadata.ColumnHandle;
+import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Split;
-import com.facebook.presto.spi.ConnectorColumnHandle;
+import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorPageSource;
-import com.facebook.presto.spi.ConnectorPageSourceProvider;
-import com.google.common.collect.Lists;
+import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.connector.ConnectorPageSourceProvider;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
+import static java.util.Objects.requireNonNull;
 
 public class PageSourceManager
         implements PageSourceProvider
@@ -38,14 +38,14 @@ public class PageSourceManager
     }
 
     @Override
-    public ConnectorPageSource createPageSource(Split split, List<ColumnHandle> columns)
+    public ConnectorPageSource createPageSource(Session session, Split split, List<ColumnHandle> columns)
     {
-        checkNotNull(split, "split is null");
-        checkNotNull(columns, "columns is null");
+        requireNonNull(split, "split is null");
+        requireNonNull(columns, "columns is null");
 
-        List<ConnectorColumnHandle> handles = Lists.transform(columns, ColumnHandle::getConnectorHandle);
-
-        return getPageSourceProvider(split).createPageSource(split.getConnectorSplit(), handles);
+        // assumes connectorId and catalog are the same
+        ConnectorSession connectorSession = session.toConnectorSession(split.getConnectorId());
+        return getPageSourceProvider(split).createPageSource(split.getTransactionHandle(), connectorSession, split.getConnectorSplit(), columns);
     }
 
     private ConnectorPageSourceProvider getPageSourceProvider(Split split)

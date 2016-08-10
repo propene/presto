@@ -13,54 +13,99 @@ package com.facebook.presto.operator.scalar;
  * limitations under the License.
  */
 
-import com.facebook.presto.metadata.FunctionInfo;
-import com.facebook.presto.metadata.FunctionRegistry;
-import com.facebook.presto.metadata.ParametricOperator;
-import com.facebook.presto.spi.block.BlockBuilder;
-import com.facebook.presto.spi.block.BlockBuilderStatus;
+import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.block.Block;
+import com.facebook.presto.spi.function.OperatorDependency;
+import com.facebook.presto.spi.function.ScalarOperator;
+import com.facebook.presto.spi.function.SqlType;
+import com.facebook.presto.spi.function.TypeParameter;
+import com.facebook.presto.spi.function.TypeParameterSpecialization;
 import com.facebook.presto.spi.type.StandardTypes;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.spi.type.TypeManager;
-import com.facebook.presto.spi.type.TypeSignature;
-import com.google.common.collect.ImmutableList;
-import io.airlift.slice.Slice;
+import com.google.common.base.Throwables;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Map;
 
-import static com.facebook.presto.metadata.FunctionRegistry.operatorInfo;
-import static com.facebook.presto.metadata.OperatorType.LESS_THAN_OR_EQUAL;
-import static com.facebook.presto.metadata.Signature.orderableTypeParameter;
-import static com.facebook.presto.spi.type.TypeSignature.parseTypeSignature;
-import static com.facebook.presto.util.Reflection.methodHandle;
+import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static com.facebook.presto.spi.function.OperatorType.LESS_THAN;
+import static com.facebook.presto.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
+import static com.facebook.presto.spi.type.TypeUtils.readNativeValue;
+import static com.facebook.presto.type.ArrayType.ARRAY_NULL_ELEMENT_MSG;
+import static com.facebook.presto.type.TypeUtils.checkElementNotNull;
 
-public class ArrayLessThanOrEqualOperator
-        extends ParametricOperator
+@ScalarOperator(LESS_THAN_OR_EQUAL)
+public final class ArrayLessThanOrEqualOperator
 {
-    public static final ArrayLessThanOrEqualOperator ARRAY_LESS_THAN_OR_EQUAL = new ArrayLessThanOrEqualOperator();
-    private static final TypeSignature RETURN_TYPE = parseTypeSignature(StandardTypes.BOOLEAN);
-    public static final MethodHandle METHOD_HANDLE = methodHandle(ArrayLessThanOrEqualOperator.class, "lessThanOrEqual", Type.class, Slice.class, Slice.class);
+    private ArrayLessThanOrEqualOperator() {}
 
-    private ArrayLessThanOrEqualOperator()
+    @TypeParameter("E")
+    @SqlType(StandardTypes.BOOLEAN)
+    public static boolean lessThanOrEqual(
+                    @OperatorDependency(operator = LESS_THAN, returnType = StandardTypes.BOOLEAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
+                    @TypeParameter("E") Type type,
+                    @SqlType("array(E)") Block leftArray,
+                    @SqlType("array(E)") Block rightArray)
     {
-        super(LESS_THAN_OR_EQUAL, ImmutableList.of(orderableTypeParameter("T")), StandardTypes.BOOLEAN, ImmutableList.of("array<T>", "array<T>"));
+        int len = Math.min(leftArray.getPositionCount(), rightArray.getPositionCount());
+        int index = 0;
+        while (index < len) {
+            checkElementNotNull(leftArray.isNull(index), ARRAY_NULL_ELEMENT_MSG);
+            checkElementNotNull(rightArray.isNull(index), ARRAY_NULL_ELEMENT_MSG);
+            Object leftElement = readNativeValue(type, leftArray, index);
+            Object rightElement = readNativeValue(type, rightArray, index);
+            try {
+                if ((boolean) lessThanFunction.invoke(leftElement, rightElement)) {
+                    return true;
+                }
+                if ((boolean) lessThanFunction.invoke(rightElement, leftElement)) {
+                    return false;
+                }
+            }
+            catch (Throwable t) {
+                Throwables.propagateIfInstanceOf(t, Error.class);
+                Throwables.propagateIfInstanceOf(t, PrestoException.class);
+
+                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+            }
+            index++;
+        }
+
+        return leftArray.getPositionCount() <= rightArray.getPositionCount();
     }
 
-    @Override
-    public FunctionInfo specialize(Map<String, Type> types, int arity, TypeManager typeManager, FunctionRegistry functionRegistry)
+    @TypeParameter("E")
+    @TypeParameterSpecialization(name = "E", nativeContainerType = long.class)
+    @SqlType(StandardTypes.BOOLEAN)
+    public static boolean lessThanOrEqualLong(
+            @OperatorDependency(operator = LESS_THAN, returnType = StandardTypes.BOOLEAN, argumentTypes = {"E", "E"}) MethodHandle lessThanFunction,
+            @TypeParameter("E") Type type,
+            @SqlType("array(E)") Block leftArray,
+            @SqlType("array(E)") Block rightArray)
     {
-        Type type = types.get("T");
-        type = typeManager.getParameterizedType(StandardTypes.ARRAY, ImmutableList.of(type.getTypeSignature()), ImmutableList.of());
-        TypeSignature typeSignature = type.getTypeSignature();
-        return operatorInfo(LESS_THAN_OR_EQUAL, RETURN_TYPE, ImmutableList.of(typeSignature, typeSignature), METHOD_HANDLE.bindTo(type), false, ImmutableList.of(false, false));
-    }
+        int len = Math.min(leftArray.getPositionCount(), rightArray.getPositionCount());
+        int index = 0;
+        while (index < len) {
+            checkElementNotNull(leftArray.isNull(index), ARRAY_NULL_ELEMENT_MSG);
+            checkElementNotNull(rightArray.isNull(index), ARRAY_NULL_ELEMENT_MSG);
+            long leftElement = type.getLong(leftArray, index);
+            long rightElement = type.getLong(rightArray, index);
+            try {
+                if ((boolean) lessThanFunction.invokeExact(leftElement, rightElement)) {
+                    return true;
+                }
+                if ((boolean) lessThanFunction.invokeExact(rightElement, leftElement)) {
+                    return false;
+                }
+            }
+            catch (Throwable t) {
+                Throwables.propagateIfInstanceOf(t, Error.class);
+                Throwables.propagateIfInstanceOf(t, PrestoException.class);
 
-    public static boolean lessThanOrEqual(Type type, Slice left, Slice right)
-    {
-        BlockBuilder leftBlockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), 1, left.length());
-        BlockBuilder rightBlockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), 1, right.length());
-        leftBlockBuilder.writeBytes(left, 0, left.length());
-        rightBlockBuilder.writeBytes(right, 0, right.length());
-        return type.compareTo(leftBlockBuilder.closeEntry().build(), 0, rightBlockBuilder.closeEntry().build(), 0) <= 0;
+                throw new PrestoException(GENERIC_INTERNAL_ERROR, t);
+            }
+            index++;
+        }
+
+        return leftArray.getPositionCount() <= rightArray.getPositionCount();
     }
 }
