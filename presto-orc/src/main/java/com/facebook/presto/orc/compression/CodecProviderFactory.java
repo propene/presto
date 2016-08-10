@@ -11,9 +11,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.orc.metadata;
+package com.facebook.presto.orc.compression;
 
-public enum CompressionKind
+import com.facebook.presto.orc.metadata.CompressionKind;
+
+import java.util.Properties;
+
+public interface CodecProviderFactory
 {
-    UNCOMPRESSED, ZLIB, SNAPPY, ENCRYPTED
+    CodecProvider create(CompressionKind compressionKind, int maxBufferSize, Properties schema);
 }

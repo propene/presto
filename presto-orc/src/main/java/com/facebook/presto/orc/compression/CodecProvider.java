@@ -11,9 +11,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.orc.metadata;
+package com.facebook.presto.orc.compression;
 
-public enum CompressionKind
+import com.facebook.presto.orc.memory.AbstractAggregatedMemoryContext;
+import com.facebook.presto.orc.metadata.CompressionKind;
+
+public interface CodecProvider
 {
-    UNCOMPRESSED, ZLIB, SNAPPY, ENCRYPTED
+    Codec get(AbstractAggregatedMemoryContext memoryContext);
+
+    CompressionKind getCompressionKind();
 }
